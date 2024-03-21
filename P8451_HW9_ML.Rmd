@@ -1,0 +1,106 @@
+---
+title: "P8451_HW9"
+author: "Ruixi Li"
+date: "2024-03-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data Preparation
+
+```{r data_prep}
+library(lattice)
+library(NHANES)
+library(dplyr)
+library(caret)
+library(randomForest)
+
+
+data ("NHANES")
+table(NHANES$Diabetes)# the data is strongly imbalanced
+
+keep.var<-names(NHANES) %in% c("Age", "Race1", "Education", "Poverty", "Weight", "Height", "Pulse", "Diabetes", "BMI", "PhysActive", "Smoke100", "BPSysAve", "BPDiaAve", "TotChol")
+
+NHANES.subset<-NHANES[keep.var]
+
+skimr::skim(NHANES.subset)
+
+#Remove missings and then remove duplicates
+NHANES.subset<-na.omit(NHANES.subset)
+NHANES.subset<-unique(NHANES.subset)
+
+#Check distributions
+skimr::skim(NHANES.subset)
+```
+
+### Set up: Partition data into training/testing
+
+```{r partition}
+
+set.seed(123)
+
+train.indices <- NHANES.subset %>%
+  pull(Diabetes) %>%
+  createDataPartition(p = 0.7, list = FALSE)
+
+train.data <- NHANES.subset %>%
+  slice(train.indices)
+
+test.data <- NHANES.subset %>%
+  slice(-train.indices)
+
+control.obj<-trainControl(method="cv", number=5, sampling="up")
+
+```
+
+### Model 1: Random Forest with 3 values of mtry and 3 values of ntree
+
+```{r}
+# hyperparameter tuning
+# Try mtry of all, half of all, sqrt of all, 
+# Try ntree of 100, 300, 500
+feat.count<-c((ncol(train.data)-1), (ncol(train.data)-1)/2, sqrt(ncol(train.data)-1))
+
+grid.rf<-expand.grid(mtry=feat.count)
+
+tree.num<-seq(100,500, by=200)
+results.trees<-list()
+for (ntree in tree.num){
+  set.seed(123)
+    rf.nhanes<-train(
+                      Diabetes~., 
+                      data=train.data, 
+                      method="rf", 
+                      trControl=control.obj, 
+                      metric="Accuracy", 
+                      tuneGrid=grid.rf, 
+                      importance=TRUE, 
+                      ntree=ntree)
+    index<-toString(ntree)
+  results.trees[[index]]<-rf.nhanes$results
+}
+
+output.nhanes<-bind_rows(results.trees, .id = "ntrees")
+best.tune<-output.nhanes[which.max(output.nhanes[,"Accuracy"]),]
+best.tune$mtry
+# results.trees-no need to output
+mtry.grid<-expand.grid(.mtry=best.tune$mtry)# choose the best tune to retrain the model
+
+set.seed(123)
+    rf.nhanes.bt<-train(
+                        Diabetes~., 
+                        data=train.data, 
+                        method="rf", 
+                        trControl=control.obj, 
+                        metric="Accuracy", 
+                        tuneGrid=mtry.grid, 
+                        importance=TRUE, 
+                        ntree=as.numeric(best.tune$ntrees))
+
+confusionMatrix(rf.nhanes.bt)
+varImp(rf.nhanes.bt)
+varImpPlot(rf.nhanes.bt$finalModel)
+```
