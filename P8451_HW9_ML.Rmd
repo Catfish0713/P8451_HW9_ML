@@ -27,10 +27,14 @@ keep.var<-names(NHANES) %in% c("Age", "Race1", "Education", "Poverty", "Weight",
 
 NHANES.subset<-NHANES[keep.var]
 
-# Set up the reference group for the prediction outcome
-NHANES.subset = NHANES.subset |> mutate(Diabetes = relevel(Diabetes,ref = "No"))
+# check the coding and refernce group of the outcome
+contrasts(NHANES.subset$Diabetes)
+# Since the reference group is assigned correctly, I don't need to change it.
 
-skimr::skim(NHANES.subset)
+# Set up the reference group for the prediction outcome
+# NHANES.subset = NHANES.subset |> mutate(Diabetes = relevel(Diabetes,ref = "No"))
+
+skimr::skim(NHANES.subset) # all variables are numeric or factor, have missing
 
 #Remove missings and then remove duplicates
 NHANES.subset<-na.omit(NHANES.subset)
@@ -38,6 +42,8 @@ NHANES.subset<-unique(NHANES.subset)
 
 #Check distributions
 skimr::skim(NHANES.subset)
+
+
 ```
 
 ### Set up: Partition data into training/testing
@@ -56,21 +62,33 @@ train.data <- NHANES.subset %>%
 test.data <- NHANES.subset %>%
   slice(-train.indices)
 
-control.obj<-trainControl(method="cv", number=5, sampling="up")
+
 
 ```
 
 ### Model 1: Random Forest with 3 values of mtry and 3 values of ntree
 
 ```{r}
+
+control.obj<-trainControl(method="cv", 
+                          number=5, 
+                          sampling="up", 
+                          summaryFunction = twoClassSummary,
+                          classProbs = TRUE)
+#I use 5-fold cv here to reduce computational load
+# The twoClassSummary function is designed for binary classification problems and will provide metrics like sensitivity, specificity, and Area Under the ROC Curve (AUC).
+# ClassProbs=TRUE is necessary for twoClassSummary to work because it requires class probabilities to calculate AUC.
+
 # hyperparameter tuning
 # Try mtry of all, half of all, sqrt of all, 
 # Try ntree of 100, 300, 500
-feat.count<-c((ncol(train.data)-1), (ncol(train.data)-1)/2, sqrt(ncol(train.data)-1))
+feat.count<-c((ncol(train.data)-1), (ncol(train.data)-1)/2, sqrt(ncol(train.data)-1),2,3)
+# I want to try more mtry, but it takes too long. Since the model have poor performace when mtry=1, I just add 2, 3 as candidate mtry.
 
 grid.rf<-expand.grid(mtry=feat.count)
 
 tree.num<-seq(100,500, by=200)
+
 results.trees<-list()
 for (ntree in tree.num){
   set.seed(123)
@@ -79,54 +97,52 @@ for (ntree in tree.num){
                       data=train.data, 
                       method="rf", 
                       trControl=control.obj, 
-                      metric="Accuracy", 
+                      metric="ROC", 
                       tuneGrid=grid.rf, 
-                      importance=TRUE, 
+                      importance=TRUE, # the model will calculate variable importance measures
                       ntree=ntree)
     index<-toString(ntree)
   results.trees[[index]]<-rf.nhanes$results
 }
 
+plot(rf.nhanes)
 output.nhanes<-bind_rows(results.trees, .id = "ntrees")
-best.tune<-output.nhanes[which.max(output.nhanes[,"Accuracy"]),]
+best.tune<-output.nhanes[which.max(output.nhanes[,"ROC"]),]
 best.tune$mtry
 # results.trees-no need to output
 mtry.grid<-expand.grid(.mtry=best.tune$mtry)# choose the best tune to retrain the model
 
 set.seed(123)
     rf.nhanes.bt<-train(
-                        Diabetes~., 
-                        data=train.data, 
-                        method="rf", 
-                        trControl=control.obj, 
-                        metric="Accuracy", 
-                        tuneGrid=mtry.grid, 
-                        importance=TRUE, 
-                        ntree=as.numeric(best.tune$ntrees))
+                      Diabetes~., 
+                      data=train.data, 
+                      method="rf", 
+                      trControl=control.obj, 
+                      metric="ROC", 
+                      tuneGrid=grid.rf, 
+                      importance=TRUE,
+                      ntree=as.numeric(best.tune$ntrees))
 
-confusionMatrix(rf.nhanes.bt)
+
 varImp(rf.nhanes.bt)
 varImpPlot(rf.nhanes.bt$finalModel)
 
-# using ROC to 
-pred.rf = rf.nhanes.bt |>
-              predict(train.data)
 
-pred.rf.prob = rf.nhanes.bt |> 
-  predict(train.data, type = "prob")
-
-analysis_rf = roc(response=train.data$Diabetes, predictor=pred.rf.prob[,2])
-plot(analysis_rf, main = "ROC Curve with Training Data")
-auc(analysis_rf)
 
 ```
+
+* Random forest have the function of feature selection, we might consider focusing on the most important variables for a more parsimonious model or for insight into the features most strongly associated with the outcome variable. Given the variable importance plot, some Education, race category is not that important, but they can not be excluded seperately.
 
 ### Model 2: Support Vector Classifier
 
 ```{r}
 set.seed(123)
 
-control.obj<-trainControl(method="cv", number=5, sampling="up", classProbs = TRUE)
+control.obj<-trainControl(method="cv", 
+                          number=5, 
+                          sampling="up",
+                          summaryFunction = twoClassSummary,
+                          classProbs = TRUE)
 
 #Repeat expanding the grid search
 set.seed(123)
@@ -135,37 +151,66 @@ svc.nhanes<-train(
                   Diabetes ~ ., 
                   data=train.data, 
                   method="svmLinear", 
+                  metric="ROC", 
                   trControl=control.obj, 
                   preProcess=c("center", "scale"), 
-                  probability=TRUE, # for random forest, this is not necessary
+                  probability=TRUE, 
+                  importance=TRUE,
                   tuneGrid=expand.grid(C=seq(0.0001,100, length=10)))
-
-svc.nhanes$bestTune
-#svc.nhanes$results
-confusionMatrix(svc.nhanes)
+# for random forest, preProcess and probability is not necessary
+svc.nhanes$results
+plot(svc.nhanes)
 
 
 ```
+
+* At very low cost values (near 0), the model performance is poorer, with ROC values significantly lower than the rest of the cost values. This indicates underfitting;The ROC performance increase sharply as cost increases from 0 to 10; Beyond a certain cost threshold (around 10 to 20), the ROC value levels off and becomes relatively stable despite further increases in cost. This suggests that the model has reached a point where adding more complexity (lower regularization) does not significantly improve cross-validated performance. There is some variability in ROC scores at higher cost values, but it does not show a clear trend of improvement or degradation. This slight variation is typical in cross-validation results due to the randomness inherent in the partitioning of data. I would say the best tune might be 11.1112. 
+
 
 ### Model 3: Logistic Regression
 ```{r}
 set.seed(123)
 
-control.obj<-trainControl(method="cv", number=5, sampling="up")
+control.obj<-trainControl(method="cv", 
+                          number=5, 
+                          sampling="up",
+                          summaryFunction = twoClassSummary,
+                          classProbs = TRUE)
 
 logit.nhanes<-train(
                     Diabetes~., 
                     data=train.data, 
                     method="glm", 
                     family="binomial",
+                    metric="ROC", 
                     preProcess=c("center", "scale"), 
                     trControl=control.obj)
+# importance=TRUE is not applicable in logistic regression
 
 logit.nhanes$results
-confusionMatrix(logit.nhanes)
 coef(logit.nhanes$finalModel)
+# plot(logit.nhanes$finalModel,select=3) 
+# The plot() function for a glm object can produce several types of diagnostic plots to assess the fit of the model. The select argument specifies which type of plot to produce:
 
+# select=1: Residuals vs Fitted
+# select=2: Normal Q-Q
+# select=3: Scale-Location (also known as Spread-Location or Standardized residuals vs. Fitted)
+# select=4: Cook's Distance plot
+# select=5: Residuals vs Leverage plot that helps us to find influential cases
 ```
+
+
+# Using resamples(multiple evaluation methods) to compare the three models
+
+```{r resamples}
+res = resamples(list(RF = rf.nhanes.bt,
+                     SVC = svc.nhanes,
+                     GLM = logit.nhanes))
+summary(res)
+```
+
+* I assume the purpose of this machine learning is to develop a tool to predict diabetes using above predictors. So, AUC value, which indicates the discriminative ability is important. Meanwhile, for most practical applications, a balance between sensitivity and specificity is desirable. Given the results, ROC of the three models are similar, RF's specificity is too low whereas its sensitivity is higher than the other two models. So RF is not the optimal model. SVC had higher sensitivity, AUC compared with Logistic regression ,their specificity are the same. So, I would choose SVC as the optimal mode. 
+
 
 ### Output predicted probabilities from each of the three models applied within the testing set. 
 
