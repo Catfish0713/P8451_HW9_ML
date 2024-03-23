@@ -2,16 +2,14 @@
 title: "P8451_HW9"
 author: "Ruixi Li"
 date: "2024-03-20"
-output: html_document
+output: word_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
+
 
 # Data Preparation
 
-```{r data_prep}
+```{r data_prep, warning=FALSE, message=FALSE}
 library(lattice)
 library(NHANES)
 library(dplyr)
@@ -46,7 +44,7 @@ skimr::skim(NHANES.subset)
 
 ```
 
-### Set up: Partition data into training/testing
+# Set up: Partition data into training/testing
 
 ```{r partition}
 
@@ -66,9 +64,11 @@ test.data <- NHANES.subset %>%
 
 ```
 
-### Model 1: Random Forest with 3 values of mtry and 3 values of ntree
+# Model building and hyperparameter tuning
 
-```{r}
+## Model 1: Random Forest with 3 values of mtry and 3 values of ntree
+
+```{r rf_model_building}
 
 control.obj<-trainControl(method="cv", 
                           number=5, 
@@ -119,7 +119,7 @@ set.seed(123)
                       method="rf", 
                       trControl=control.obj, 
                       metric="ROC", 
-                      tuneGrid=grid.rf, 
+                      tuneGrid=mtry.grid, 
                       importance=TRUE,
                       ntree=as.numeric(best.tune$ntrees))
 
@@ -131,11 +131,13 @@ varImpPlot(rf.nhanes.bt$finalModel)
 
 ```
 
-* Random forest have the function of feature selection, we might consider focusing on the most important variables for a more parsimonious model or for insight into the features most strongly associated with the outcome variable. Given the variable importance plot, some Education, race category is not that important, but they can not be excluded seperately.
+* Random forest have the function of feature selection, we might consider focusing on the most important variables for a more parsimonious model or for insight into the features most strongly associated with the outcome variable. Given the variable importance plot, some Education, race category is not that important(contribution <10%), but they can not be excluded separately.Ideally, I want to take a subset of features that contribute the most to model accuracy and purity to achieve the best trade-off between model complexity and predictive power.
 
-### Model 2: Support Vector Classifier
+* Instead of removing features,a more common approach would be to take the features until you reach a point of diminishing returns, where adding more features does not significantly increase the model's performance.
 
-```{r}
+## Model 2: Support Vector Classifier
+
+```{r svc_model_building}
 set.seed(123)
 
 control.obj<-trainControl(method="cv", 
@@ -158,7 +160,7 @@ svc.nhanes<-train(
                   importance=TRUE,
                   tuneGrid=expand.grid(C=seq(0.0001,100, length=10)))
 # for random forest, preProcess and probability is not necessary
-svc.nhanes$results
+# svc.nhanes$results
 plot(svc.nhanes)
 
 
@@ -167,8 +169,8 @@ plot(svc.nhanes)
 * At very low cost values (near 0), the model performance is poorer, with ROC values significantly lower than the rest of the cost values. This indicates underfitting;The ROC performance increase sharply as cost increases from 0 to 10; Beyond a certain cost threshold (around 10 to 20), the ROC value levels off and becomes relatively stable despite further increases in cost. This suggests that the model has reached a point where adding more complexity (lower regularization) does not significantly improve cross-validated performance. There is some variability in ROC scores at higher cost values, but it does not show a clear trend of improvement or degradation. This slight variation is typical in cross-validation results due to the randomness inherent in the partitioning of data. I would say the best tune might be 11.1112. 
 
 
-### Model 3: Logistic Regression
-```{r}
+## Model 3: Logistic Regression
+```{r logit_model_building}
 set.seed(123)
 
 control.obj<-trainControl(method="cv", 
@@ -199,22 +201,11 @@ coef(logit.nhanes$finalModel)
 # select=5: Residuals vs Leverage plot that helps us to find influential cases
 ```
 
+# Calibration
 
-# Using resamples(multiple evaluation methods) to compare the three models
+## Get predicted propabilities
 
-```{r resamples}
-res = resamples(list(RF = rf.nhanes.bt,
-                     SVC = svc.nhanes,
-                     GLM = logit.nhanes))
-summary(res)
-```
-
-* I assume the purpose of this machine learning is to develop a tool to predict diabetes using above predictors. So, AUC value, which indicates the discriminative ability is important. Meanwhile, for most practical applications, a balance between sensitivity and specificity is desirable. Given the results, ROC of the three models are similar, RF's specificity is too low whereas its sensitivity is higher than the other two models. So RF is not the optimal model. SVC had higher sensitivity, AUC compared with Logistic regression ,their specificity are the same. So, I would choose SVC as the optimal mode. 
-
-
-### Output predicted probabilities from each of the three models applied within the testing set. 
-
-```{r}
+```{r predicted_prop}
 
 #Predict in test-set and output probabilities
 rf.probs<-predict(rf.nhanes, test.data, type="prob")
@@ -236,3 +227,114 @@ hist(rf.pp)
 hist(svc.pp)
 hist(logit.pp)
 ```
+
+## Pre calibration plots
+Plot and compare calibration curves across the three algorithms. 
+
+```{r pre_calibration}
+pred.prob<-data.frame(Class=test.data$Diabetes, logit=logit.pp, rf=rf.pp, svc=svc.pp)
+
+calplot<-(calibration(Class ~ logit+rf+svc, data=pred.prob, class="Yes", cuts=10))
+
+xyplot(calplot, auto.key=list(columns=3))
+```
+
+* The diagonal grey line represents ideal calibration, where the predicted probabilities match the observed frequencies. A model’s line above the diagonal indicates underconfidence (the model’s predictions are too conservative), and a line below the diagonal indicates overconfidence (the model’s predictions are too optimistic). In this case, rf and logit model shows similar calibration, they are both overconfident across all bins(when the predicted probability is high); The rf model is relatively well-calibrated, especially when the predicted probability is low.
+
+## Calibrate the probabilities from SVC and RF/Post calibration plots
+
+Partition testing data into 2 sets: set to train calibration and then set to evaluate results
+
+Method 1: Platt's Scaling-train a logistic regression model on the outputs of your classifier
+
+
+```{r partion_testing_data}
+
+set.seed(123)
+cal.data.index<-test.data$Diabetes %>% 
+  createDataPartition(p=0.5, list=F)
+
+cal.data<-test.data[cal.data.index, ]
+final.test.data<-test.data[-cal.data.index, ]
+
+```
+
+1. Calibration of RF
+
+```{r cali_rf}
+#Predict on test-set without scaling to obtain raw pred prob in test set
+rf.probs.nocal<-predict(rf.nhanes, final.test.data, type="prob")
+rf.pp.nocal<-rf.probs.nocal[,2]
+
+#Apply model developed on training data to calibration dataset to obtain predictions
+rf.probs.cal<-predict(rf.nhanes, cal.data, type="prob")
+rf.pp.cal<-rf.probs.cal[,2]
+
+#Add to dataset with actual values from calibration data
+calib.data.frame.rf<-data.frame(rf.pp.cal, cal.data$Diabetes)
+colnames(calib.data.frame.rf)<-c("x", "y")
+
+#Use logistic regression to model predicted probabilities from calibration data to actual vales
+calib.model.rf<-glm(y ~ x, data=calib.data.frame.rf, family = binomial)
+
+#Apply calibration model above to raw predicted probabilities from test set
+data.test.rf<-data.frame(rf.pp.nocal)
+colnames(data.test.rf)<-c("x")
+platt.data.rf<-predict(calib.model.rf, data.test.rf, type="response")
+
+platt.prob.rf<-data.frame(Class=final.test.data$Diabetes, rf.platt=platt.data.rf, rf=rf.pp.nocal)
+
+calplot.rf<-(calibration(Class ~ rf.platt+rf, data=platt.prob.rf, class="Yes", cuts=10))
+xyplot(calplot.rf, auto.key=list(columns=2))
+
+hist(platt.data.rf)
+```
+
+* Platt's Scaling corrected the overconfident prediction when the bin midpoint < 60, improving the calibration of the RF model.
+
+2. Calibration of SVC
+
+```{r calibration_svc}
+#Predict on test-set without scaling
+svc.nocal<-predict(svc.nhanes,final.test.data, type="prob")
+svc.pp.nocal<-svc.nocal[,2]
+
+
+#Apply model developed on training data to calibration dataset to obtain predictions
+svc.cal<-predict(svc.nhanes,cal.data, type="prob")
+svc.pp.cal<-svc.cal[,2]
+
+#Add to dataset with actual values from calibration data
+
+calib.data.frame.svc<-data.frame(svc.pp.cal, cal.data$Diabetes)
+colnames(calib.data.frame.svc)<-c("x", "y")
+calib.model.svc<-glm(y ~ x, data=calib.data.frame.svc, family = binomial)
+
+#Predict on test set using model developed in calibration
+data.test.svc<-data.frame(svc.pp.nocal)
+colnames(data.test.svc)<-c("x")
+platt.data.svc<-predict(calib.model.svc, data.test.svc, type="response")
+
+platt.prob.svc<-data.frame(Class=final.test.data$Diabetes, svc.platt=platt.data.svc, svc=svc.pp.nocal)
+
+calplot.svc<-(calibration(Class ~ svc.platt+svc, data=platt.prob.svc, class="Yes", cuts=10))
+xyplot(calplot.svc, auto.key=list(columns=2))
+hist(platt.data.svc)
+```
+
+* Platt's Scaling corrected the overconfident prediction when the bin midpoint < 50, improving the calibration of the SVC model.
+
+# Using resamples(multiple evaluation methods) to compare the three models
+
+```{r resamples}
+res = resamples(list(RF = rf.nhanes.bt,
+                     SVC = svc.nhanes,
+                     GLM = logit.nhanes))
+summary(res)
+```
+
+* I assume the purpose of this machine learning is to develop a tool to predict diabetes using above predictors. Estimated prevalence of diabetes in the United States is 11.6% in the population. So, we can just look at the calibration curve when the bin midpoint is low. Among the three models, rf had the best calibration at first. But after Platt's scaling, SVC can achieve better calibration than rf.
+
+* AUC value, which indicates the discriminative ability is important. Meanwhile, for most practical applications in clinical setting, a balance between sensitivity and specificity is desirable. Given the results, ROC of the three models are similar, RF's specificity is too low whereas its sensitivity is higher than the other two models. So RF is not the optimal model. SVC had higher sensitivity, AUC compared with Logistic regression ,their specificity are the same. So, I would choose SVC as the optimal mode. 
+
+
