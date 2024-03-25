@@ -163,6 +163,18 @@ svc.nhanes<-train(
 # svc.nhanes$results
 plot(svc.nhanes)
 
+svc.nhanes.bt<-train(
+                  Diabetes ~ ., 
+                  data=train.data, 
+                  method="svmLinear", 
+                  metric="ROC", 
+                  trControl=control.obj, 
+                  preProcess=c("center", "scale"), 
+                  probability=TRUE, 
+                  importance=TRUE,
+                  tuneGrid=data.frame(C=11.1112))
+
+
 
 ```
 
@@ -214,7 +226,7 @@ rf.probs<-predict(rf.nhanes, test.data, type="prob")
 rf.pp<-rf.probs[,2]
 
 
-svc.probs<-predict(svc.nhanes,test.data, type="prob")
+svc.probs<-predict(svc.nhanes.bt,test.data, type="prob")
 svc.pp<-svc.probs[,2]
 
 
@@ -296,12 +308,12 @@ hist(platt.data.rf)
 
 ```{r calibration_svc}
 #Predict on test-set without scaling
-svc.nocal<-predict(svc.nhanes,final.test.data, type="prob")
+svc.nocal<-predict(svc.nhanes.bt,final.test.data, type="prob")
 svc.pp.nocal<-svc.nocal[,2]
 
 
 #Apply model developed on training data to calibration dataset to obtain predictions
-svc.cal<-predict(svc.nhanes,cal.data, type="prob")
+svc.cal<-predict(svc.nhanes.bt,cal.data, type="prob")
 svc.pp.cal<-svc.cal[,2]
 
 #Add to dataset with actual values from calibration data
@@ -328,7 +340,7 @@ hist(platt.data.svc)
 
 ```{r resamples}
 res = resamples(list(RF = rf.nhanes.bt,
-                     SVC = svc.nhanes,
+                     SVC = svc.nhanes.bt,
                      GLM = logit.nhanes))
 summary(res)
 ```
